@@ -202,6 +202,7 @@ class DECAF(pl.LightningModule):
     ):
         super().__init__()
         self.save_hyperparameters()
+        self.automatic_optimization = False
 
         self.iterations_d = 0
         self.iterations_g = 0
@@ -364,9 +365,9 @@ class DECAF(pl.LightningModule):
         gen_order = list(nx.algorithms.dag.topological_sort(G))
         return gen_order
 
-    def training_step(
-        self, batch: torch.Tensor, batch_idx: int, optimizer_idx: int
-    ) -> OrderedDict:
+    def training_step(self, batch: torch.Tensor, batch_idx: int) -> OrderedDict:
+        opt_d, opt_g = self.optimizers()
+
         # sample noise
         z = self.sample_z(batch.shape[0])
         z = z.type_as(batch)
@@ -377,33 +378,25 @@ class DECAF(pl.LightningModule):
             raise ValueError(
                 "we're not allowing simultaneous generation no more. Set p_gen negative"
             )
-        # train generator
-        if optimizer_idx == 0:
-            self.iterations_d += 1
-            # Measure discriminator's ability to classify real from generated samples
+        self.iterations_d += 1
+        real_loss = torch.mean(self.discriminator(batch))
+        fake_loss = torch.mean(self.discriminator(generated_batch.detach()))
+        d_loss = fake_loss - real_loss
+        d_loss += self.hparams.lambda_gp * self.compute_gradient_penalty(
+            batch, generated_batch
+        )
+        opt_d.zero_grad()
+        self.manual_backward(d_loss)
+        opt_d.step()
 
-            # how well can it label as real?
-            real_loss = torch.mean(self.discriminator(batch))
-            fake_loss = torch.mean(self.discriminator(generated_batch.detach()))
+        tqdm_dict = {"d_loss": d_loss.detach()}
 
-            # discriminator loss
-            d_loss = fake_loss - real_loss
-
-            # add the gradient penalty
-            d_loss += self.hparams.lambda_gp * self.compute_gradient_penalty(
-                batch, generated_batch
-            )
-
-            tqdm_dict = {"d_loss": d_loss.detach()}
-            output = OrderedDict(
-                {"loss": d_loss, "progress_bar": tqdm_dict, "log": tqdm_dict}
-            )
-            return output
-        elif optimizer_idx == 1:
-            # sanity check: keep track of G updates
+        if self.iterations_d % self.hparams.d_updates == 0:
             self.iterations_g += 1
+            z = self.sample_z(batch.shape[0])
+            z = z.type_as(batch)
+            generated_batch = self.generator.sequential(batch, z, self.get_gen_order())
 
-            # adversarial loss (negative D fake loss)
             g_loss = -torch.mean(
                 self.discriminator(generated_batch)
             )  # self.adversarial_loss(self.discriminator(self.generated_batch), valid)
@@ -420,15 +413,12 @@ class DECAF(pl.LightningModule):
                 if self.hparams.grad_dag_loss:
                     g_loss += self.gradient_dag_loss(batch, z)
 
-            tqdm_dict = {"g_loss": g_loss.detach()}
+            opt_g.zero_grad()
+            self.manual_backward(g_loss)
+            opt_g.step()
+            tqdm_dict["g_loss"] = g_loss.detach()
 
-            output = OrderedDict(
-                {"loss": g_loss, "progress_bar": tqdm_dict, "log": tqdm_dict}
-            )
-
-            return output
-        else:
-            raise ValueError("should not get here")
+        return OrderedDict({"loss": d_loss, "progress_bar": tqdm_dict, "log": tqdm_dict})
 
     def configure_optimizers(self) -> tuple:
         lr = self.hparams.lr
@@ -448,7 +438,4 @@ class DECAF(pl.LightningModule):
             betas=(b1, b2),
             weight_decay=weight_decay,
         )
-        return (
-            {"optimizer": opt_d, "frequency": self.hparams.d_updates},
-            {"optimizer": opt_g, "frequency": 1},
-        )
+        return opt_d, opt_g
