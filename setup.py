@@ -28,14 +28,14 @@ with open("requirements.txt") as fp:
 
 
 setuptools.setup(
-    name="decaf",
+    name="decaf-synthetic-data",
     version=find_version(),
     author="Trent Kyono",
     author_email="",
     description="DEbiasing CAusal Fairness",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/trentkyono/DECAF",
+    url="https://github.com/schneiderkamplab/DECAF",
     license="BSD-3-Clause",
     packages=setuptools.find_packages(),
     classifiers=[
