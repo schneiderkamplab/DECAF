@@ -1,5 +1,5 @@
 from collections import OrderedDict
-from typing import Any, Optional, Union
+from typing import Any, List, Optional, Union
 
 import networkx as nx
 import numpy as np
@@ -33,6 +33,26 @@ trace_expm = TraceExpm.apply
 activation_layer = nn.ReLU(inplace=True)
 
 
+def get_nonlin(name: str) -> nn.Module:
+    if name == "none":
+        return nn.Identity()
+    if name == "elu":
+        return nn.ELU()
+    if name == "relu":
+        return nn.ReLU()
+    if name == "leaky_relu":
+        return nn.LeakyReLU()
+    if name == "selu":
+        return nn.SELU()
+    if name == "tanh":
+        return nn.Tanh()
+    if name == "sigmoid":
+        return nn.Sigmoid()
+    if name == "softmax":
+        return nn.Softmax(dim=-1)
+    raise ValueError(f"Unknown nonlinearity {name}")
+
+
 class Generator_causal(nn.Module):
     def __init__(
         self,
@@ -42,10 +62,17 @@ class Generator_causal(nn.Module):
         use_mask: bool = False,
         f_scale: float = 0.1,
         dag_seed: list = [],
+        nonlin_out: Optional[List] = None,
     ) -> None:
         super().__init__()
 
+        if nonlin_out is not None:
+            out_dim = sum(length for _, length in nonlin_out)
+            if out_dim != x_dim:
+                raise RuntimeError("Invalid nonlin_out")
+
         self.x_dim = x_dim
+        self.nonlin_out = nonlin_out
 
         def block(in_feat: int, out_feat: int, normalize: bool = False) -> list:
             layers = [nn.Linear(in_feat, out_feat)]
@@ -115,7 +142,17 @@ class Generator_causal(nn.Module):
             out_i = activation_layer(
                 self.fc_i[i](torch.cat([x_masked, z[:, i].unsqueeze(1)], axis=1))
             )
-            out[:, i] = nn.Sigmoid()(self.fc_f[i](self.shared(out_i))).squeeze()
+            out[:, i] = self.fc_f[i](self.shared(out_i)).squeeze()
+        if self.nonlin_out is not None:
+            activated = []
+            start = 0
+            for activation, length in self.nonlin_out:
+                end = start + length
+                activated.append(get_nonlin(activation)(out[:, start:end]))
+                start = end
+            out = torch.cat(activated, dim=1)
+        else:
+            out = nn.Sigmoid()(out)
         return out
 
 
@@ -161,6 +198,7 @@ class DECAF(pl.LightningModule):
         l1_W: float = 1,
         p_gen: float = -1,
         use_mask: bool = False,
+        nonlin_out: Optional[List] = None,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -183,6 +221,7 @@ class DECAF(pl.LightningModule):
             h_dim=h_dim,
             use_mask=use_mask,
             dag_seed=dag_seed,
+            nonlin_out=nonlin_out,
         )
         self.discriminator = Discriminator(x_dim=self.x_dim, h_dim=h_dim)
 
@@ -321,7 +360,7 @@ class DECAF(pl.LightningModule):
         dense_dag = np.array(self.get_dag())
         dense_dag[dense_dag > 0.5] = 1
         dense_dag[dense_dag <= 0.5] = 0
-        G = nx.from_numpy_matrix(dense_dag, create_using=nx.DiGraph)
+        G = nx.from_numpy_array(dense_dag, create_using=nx.DiGraph)
         gen_order = list(nx.algorithms.dag.topological_sort(G))
         return gen_order
 
